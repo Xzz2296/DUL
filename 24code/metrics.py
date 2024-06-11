@@ -245,27 +245,27 @@ class Density_Softmax(nn.Module):
     def __init__(self,out_features,in_features):
         super(Density_Softmax, self).__init__()
         # self.weight =softmax_head.weight
-        self.weight = Parameter(torch.FloatTensor(out_features, in_features))
-        self.weight2 = Parameter(torch.FloatTensor(out_features, in_features)) 
+        self.center = Parameter(torch.FloatTensor(out_features, in_features))
+        self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+        nn.init.xavier_uniform_(self.center)
         nn.init.xavier_uniform_(self.weight)
-        nn.init.xavier_uniform_(self.weight2)
 
     def forward(self, mu, var):
         # 优化后的运算
         # 计算mu^2/std^2
-        weight = self.weight
-        weight2 =self.weight2
+        center = self.center
+        weight =self.weight
         temp_mu = torch.exp(((mu **2/var))) # B*dim
-        temp_mu = F.linear(temp_mu, weight2) # B*C
+        temp_mu = F.linear(temp_mu, weight) # B*C
         # 计算weight^2/std^2
-        temp_weight = F.linear(torch.reciprocal(var) , weight**2)
+        temp_weight = F.linear(torch.reciprocal(var) , center**2)
         # 计算mu*weight/std^2
-        temp_mu_weight = 2 * F.linear(mu/var, weight)
+        temp_mu_weight = 2 * F.linear(mu/var, center)
         density = temp_mu * torch.exp(-0.5* (temp_weight-temp_mu_weight))
-        # 将density_sum中的0元素替换为一个非常小的数
+        # 将density_sum中的0元素替换为一个非常小的数，防止除0，手动归一化
         density_sum = torch.where(density_sum == 0, torch.ones_like(density_sum) * 1e-10, density_sum)
         density = density/density_sum
-        # 当density为负时，不影响后续交叉熵计算，进行计算时会先进行softmax，保证归一化到0-1
+        # 当density为负时，不影响后续交叉熵计算，nn.corssentropyloss 在进行计算时会先进行softmax，保证归一化到0-1
         return density
     
         

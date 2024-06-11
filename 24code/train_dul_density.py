@@ -249,6 +249,7 @@ class DUL_Trainer():
                 OPTIMIZER.zero_grad()
                 loss.backward()
                 OPTIMIZER.step()
+
                 # 使用tensorboard记录特定类别的variance和weight
                 selected_classes = range(5)
                 for c in selected_classes:
@@ -256,7 +257,7 @@ class DUL_Trainer():
                     var_c = var_dul[mask]
                     # 将相对索引转为绝对索引
                     indices = labels[mask].long()
-                    w_c = HEAD.weight2[indices]
+                    w_c = HEAD.weight[indices]
                     if var_c.numel() == 0:
                         continue
                     writer.add_scalar("var_{}".format(c),var_c.mean())
@@ -270,9 +271,9 @@ class DUL_Trainer():
                           'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                           'Training Loss_KL {loss_KL.val:.4f} ({loss_KL.avg:.4f})\t'
                           'Training Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                          'Training Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'
-                          'Var Value{var.val:.3f}({var.avg:.3f})'.format(
-                        epoch + 1, self.dul_args.num_epoch, batch + 1, len(train_loader) * self.dul_args.num_epoch, time.asctime(time.localtime(time.time())), loss = losses, loss_KL=losses_KL,  top1 = top1, top5 = top5, var = var), flush=True)
+                          'Training Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                        #   'Var Value{var.val:.3f}({var.avg:.3f})'.format(
+                        epoch + 1, self.dul_args.num_epoch, batch + 1, len(train_loader) * self.dul_args.num_epoch, time.asctime(time.localtime(time.time())), loss = losses, loss_KL=losses_KL,  top1 = top1, top5 = top5), flush=True)
 
                 batch += 1 # batch index
             # training statistics per epoch (buffer for visualization)
