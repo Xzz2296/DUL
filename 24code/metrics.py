@@ -240,11 +240,10 @@ class Softmax(nn.Module):
     
 class Density_Softmax(nn.Module):
     '''
-    返回正态分布概率密度并取对数,方便后续计算 0606版本
+    返回正态分布概率密度 0606版本 0614-0616调试更新
     '''
     def __init__(self,out_features,in_features):
         super(Density_Softmax, self).__init__()
-        # self.weight =softmax_head.weight
         self.center = Parameter(torch.FloatTensor(out_features, in_features))
         self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
         nn.init.xavier_uniform_(self.center)
@@ -252,21 +251,44 @@ class Density_Softmax(nn.Module):
 
     def forward(self, mu, var):
         # 优化后的运算
-        # 计算mu^2/std^2
         center = self.center
-        weight =self.weight
-        temp_mu = torch.exp(((mu **2/var))) # B*dim
-        temp_mu = F.linear(temp_mu, weight) # B*C
-        # 计算weight^2/std^2
-        temp_weight = F.linear(torch.reciprocal(var) , center**2)
-        # 计算mu*weight/std^2
-        temp_mu_weight = 2 * F.linear(mu/var, center)
-        density = temp_mu * torch.exp(-0.5* (temp_weight-temp_mu_weight))
-        # 将density_sum中的0元素替换为一个非常小的数，防止除0，手动归一化
-        density_sum = torch.where(density_sum == 0, torch.ones_like(density_sum) * 1e-10, density_sum)
-        density = density/density_sum
-        # 当density为负时，不影响后续交叉熵计算，nn.corssentropyloss 在进行计算时会先进行softmax，保证归一化到0-1
-        return density
+        weight = self.weight
+        temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
+        temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
+        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
+        temp_mu_center = F.linear(mu/var, center) # B*C  计算mu*center/std^2
+        exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
+        density = (temp_mu_w * exp_term) # B*C
+        density_denominator = (exp_term).sum(dim=1).unsqueeze(1) + 1e-4 # 防止分母出现0
+        output = (density/density_denominator).clamp(max =20)
+        # print(f"output {torch.isnan(output).any()}")
+        return output
+
+class Density_Softmax(nn.Module):
+    '''
+    返回正态分布概率密度 0615版本
+    '''
+    def __init__(self,out_features,in_features):
+        super(Density_Softmax, self).__init__()
+        self.center = Parameter(torch.FloatTensor(out_features, in_features))
+        self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+        nn.init.xavier_uniform_(self.center)
+        nn.init.xavier_uniform_(self.weight)
+
+    def forward(self, mu, var):
+        # 优化后的运算
+        center = self.center
+        weight = self.weight
+        temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
+        temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
+        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
+        temp_mu_center = F.linear(mu/var, center) # B*C  计算mu*center/std^2
+        exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
+        density = (temp_mu_w * exp_term) # B*C
+        temp_sum = temp_mu.sum(dim=1).unsqueeze(1)+temp_center +temp_mu_center
+        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-4
+        output = nn.Sigmoid(F.batch_norm(density/density_denominator)) # batch_norm 使得均值为0，方差为1，sigmoid使得概率在0-1之间
+        return output
     
         
 

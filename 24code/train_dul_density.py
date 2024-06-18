@@ -112,7 +112,8 @@ class DUL_Trainer():
         Loss_Dict = {
             'Focal': FocalLoss(),
             'Softmax': nn.CrossEntropyLoss(),
-            'Density':Density_loss()
+            'Density':Density_loss(),
+            'NLLLoss': nn.NLLLoss()
         }
         LOSS = Loss_Dict[self.dul_args.loss_name]
         print("=" * 60)
@@ -212,9 +213,8 @@ class DUL_Trainer():
                 mu_dul,var_dul = BACKBONE(inputs) 
                 
                 # 记录selected_classes的variance
-
-
-                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul + 1e-8) - 1) * 0.5).mean()
+                # assert(torch.all(not torch.isnan(var_dul) and var_dul>0))
+                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul) - 1) * 0.5).mean()
                 losses_KL.update(loss_kl.item(), inputs.size(0))
                 loss += self.dul_args.kl_scale * loss_kl
                 if torch.isnan(loss_kl):
@@ -230,8 +230,8 @@ class DUL_Trainer():
                 if torch.isnan(loss):
                     print("loss is nan,save tensor")
                     torch.save(outputs,'outputs.pt')
-                    torch.save(HEAD.weight, 'weight.pt')
-                    torch.save(HEAD.weight2,'weight2.pt')
+                    torch.save(HEAD.center, 'center.pt')
+                    torch.save(HEAD.weight,'weight.pt')
                     torch.save(mu_dul, 'mu_dul.pt')
                     torch.save(var_dul, 'val_dul.pt')
                     return
@@ -242,9 +242,7 @@ class DUL_Trainer():
                 top1.update(prec1.data.item(), inputs.size(0))
                 top5.update(prec5.data.item(), inputs.size(0))
 
-                var.update(loss_var.item(), inputs.size(0))
-
-
+                # var.update(loss_var.item(), inputs.size(0))
                 # compute gradient and do SGD step
                 OPTIMIZER.zero_grad()
                 loss.backward()
@@ -260,8 +258,8 @@ class DUL_Trainer():
                     w_c = HEAD.weight[indices]
                     if var_c.numel() == 0:
                         continue
-                    writer.add_scalar("var_{}".format(c),var_c.mean())
-                    writer.add_scalar("weight_{}".format(c),w_c.mean())
+                    writer.add_scalar("var_{}".format(c),var_c.mean(),global_step=batch)
+                    writer.add_scalar("weight_{}".format(c),w_c.mean(),global_step=batch)
 
                 # dispaly training loss & acc every DISP_FREQ
                 if ((batch + 1) % DISP_FREQ == 0) and batch != 0:
