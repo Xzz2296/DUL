@@ -240,45 +240,22 @@ class Softmax(nn.Module):
     
 class Density_Softmax(nn.Module):
     '''
-    返回正态分布概率密度 0606版本 0614-0616调试更新
+    返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
     '''
     def __init__(self,out_features,in_features):
         super(Density_Softmax, self).__init__()
-        self.center = Parameter(torch.FloatTensor(out_features, in_features))
+        # self.center = Parameter(torch.FloatTensor(out_features, in_features))
+        # self.center = center
         self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
-        nn.init.xavier_uniform_(self.center)
+        # nn.init.xavier_uniform_(self.center)
         nn.init.xavier_uniform_(self.weight)
 
-    def forward(self, mu, var):
+    def forward(self,center, mu, var):
         # 优化后的运算
-        center = self.center
-        weight = self.weight
-        temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
-        temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
-        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
-        temp_mu_center = F.linear(mu/var, center) # B*C  计算mu*center/std^2
-        exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
-        density = (temp_mu_w * exp_term) # B*C
-        density_denominator = (exp_term).sum(dim=1).unsqueeze(1) + 1e-4 # 防止分母出现0
-        output = (density/density_denominator).clamp(max =20)
-        # print(f"output {torch.isnan(output).any()}")
-        return output
-
-class Density_Softmax(nn.Module):
-    '''
-    返回正态分布概率密度 0615版本
-    '''
-    def __init__(self,out_features,in_features):
-        super(Density_Softmax, self).__init__()
-        self.center = Parameter(torch.FloatTensor(out_features, in_features))
-        self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
-        nn.init.xavier_uniform_(self.center)
-        nn.init.xavier_uniform_(self.weight)
-
-    def forward(self, mu, var):
-        # 优化后的运算
-        center = self.center
-        weight = self.weight
+        # center = self.center
+        weight = abs(self.weight)
+        # 统计weight 第1个维度 即C维度中有多少为0，有多少不为0
+        nonzero_ratio = torch.sum(weight != 0,dim=1)/weight.shape[1]
         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
         temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
         temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
@@ -286,13 +263,40 @@ class Density_Softmax(nn.Module):
         exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
         density = (temp_mu_w * exp_term) # B*C
         temp_sum = temp_mu.sum(dim=1).unsqueeze(1)+temp_center +temp_mu_center
-        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-4
-        output = nn.Sigmoid(F.batch_norm(density/density_denominator)) # batch_norm 使得均值为0，方差为1，sigmoid使得概率在0-1之间
+        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-4 # 防止分母出现0
+        output = (density/density_denominator)
+        output = (output.sum()/(mu.shape[0] * nonzero_ratio.sum() + 1e-8)).clamp(max =20)
         return output
+
+# class Density_Softmax(nn.Module):
+#     '''
+#     返回正态分布概率密度并取对数,方便后续计算 0612版本
+#     '''
+#     def __init__(self,out_features,in_features):
+#         super(Density_Softmax, self).__init__()
+#         # self.weight =softmax_head.weight
+#         self.center = Parameter(torch.FloatTensor(out_features, in_features))
+#         self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+#         nn.init.xavier_uniform_(self.center)
+#         # nn.init.uniform_(self.weight, 1e-8, 1)
+#         nn.init.uniform_(self.weight, 1e-5, 1)
+#         self.bias = torch.log(torch.tensor(2.0 * torch.pi))
+
+#     def forward(self, mu, var):
+#         # 优化后的运算
+#         # 计算mu^2/std^2
+#         center = self.center
+#         weight = self.weight
+#         temp_mu_clamped = torch.exp(((mu **2/var)).clamp(max= 10)) # B*dim
+#         temp_mu = torch.log(torch.clamp(F.linear(temp_mu_clamped, weight),min=1e-8)) # B*C
+#         # 计算weight^2/std^2
+#         temp_weight = F.linear(torch.reciprocal(var) , center**2)
+#         # 计算mu*weight/std^2
+#         temp_mu_weight = 2 * F.linear(mu/var, center)
+#         density = -0.5*((temp_mu + temp_weight - temp_mu_weight) + torch.sum(torch.log(var), dim=1).unsqueeze(1)) + self.bias
+#         # print(torch.isnan(density).any())
+#         return density
     
-        
-
-
 class ArcFace(nn.Module):
     r"""Implement of ArcFace (https://arxiv.org/pdf/1801.07698v1.pdf):
         Args:
@@ -544,12 +548,18 @@ class Am_softmax(nn.Module):
         return output
 
 if __name__ == "__main__":
-    feat = F.normalize(torch.rand(256, 64, requires_grad=True))
-    lbl = torch.randint(high=10, size=(256,))
+    # feat = F.normalize(torch.rand(256, 64, requires_grad=True))
+    # lbl = torch.randint(high=10, size=(256,))
 
-    inp_sp, inp_sn = convert_label_to_similarity(feat, lbl)
+    # inp_sp, inp_sn = convert_label_to_similarity(feat, lbl)
 
-    criterion = CircleLoss(m=0.25, gamma=256)
-    circle_loss = criterion(inp_sp, inp_sn)
+    # criterion = CircleLoss(m=0.25, gamma=256)
+    # circle_loss = criterion(inp_sp, inp_sn)
 
-    print(circle_loss)
+    # print(circle_loss)
+    head = Density_Softmax(512, 10)
+    softmax_head = Softmax(10, 512, None)
+    mu = torch.rand(256, 10)
+    std = torch.rand(256, 10)
+    output = head(head.weight,mu, std).mean()
+    print(output)

@@ -105,6 +105,7 @@ class DUL_Trainer():
             'Density':Density_Softmax(in_features = self.dul_args.embedding_size, out_features = num_class)
         }
         HEAD = Head_Dict[self.dul_args.head_name]
+        SOFTMAX_HEAD = Head_Dict['Softmax']
         print("=" * 60)
         print("Head Generated: '{}' ".format(self.dul_args.head_name))
 
@@ -121,10 +122,11 @@ class DUL_Trainer():
         # ----- separate batch_norm parameters from others; do not do weight decay for batch_norm parameters to improve the generalizability
         backbone_paras_only_bn, backbone_paras_wo_bn = separate_irse_bn_paras(BACKBONE)
         _, head_paras_wo_bn = separate_irse_bn_paras(HEAD)
+        _, softmax_head_paras_wo_bn = separate_irse_bn_paras(SOFTMAX_HEAD)
 
         # ----- optimizer generate
         Optimizer_Dict = {
-            'SGD': optim.SGD([{'params': backbone_paras_wo_bn + head_paras_wo_bn, 'weight_decay': self.dul_args.weight_decay}, 
+            'SGD': optim.SGD([{'params': backbone_paras_wo_bn + head_paras_wo_bn + softmax_head_paras_wo_bn, 'weight_decay': self.dul_args.weight_decay}, 
                             {'params': backbone_paras_only_bn}], lr=self.dul_args.lr, momentum=self.dul_args.momentum),
             'Adam': optim.Adam([{'params': backbone_paras_wo_bn + head_paras_wo_bn, 'weight_decay': self.dul_args.weight_decay}, 
                             {'params': backbone_paras_only_bn}], lr=self.dul_args.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
@@ -153,14 +155,16 @@ class DUL_Trainer():
         # ----- multi-gpu or single-gpu
         if self.dul_args.multi_gpu:
             BACKBONE = nn.DataParallel(BACKBONE, device_ids=self.dul_args.gpu_id).cuda()
+            SOFTMAX_HEAD =SOFTMAX_HEAD.cuda()
             HEAD = HEAD.cuda()
             LOSS = LOSS.cuda()
         else:
             BACKBONE = BACKBONE.cuda()
+            SOFTMAX_HEAD =SOFTMAX_HEAD.cuda()
             HEAD = HEAD.cuda()
             LOSS = LOSS.cuda()
 
-        return BACKBONE, HEAD, LOSS, OPTIMIZER
+        return BACKBONE, HEAD, SOFTMAX_HEAD, LOSS, OPTIMIZER
 
 
 
@@ -169,7 +173,7 @@ class DUL_Trainer():
 
         train_loader, num_class = self._data_loader()
 
-        BACKBONE, HEAD, LOSS, OPTIMIZER = self._model_loader(num_class=num_class)
+        BACKBONE, HEAD,SOFTMAX_HEAD, LOSS, OPTIMIZER = self._model_loader(num_class=num_class)
 
         DISP_FREQ = len(train_loader) // 100 # frequency to display training loss & acc
 
@@ -193,14 +197,16 @@ class DUL_Trainer():
             
             BACKBONE.train()  # set to training mode
             HEAD.train()
+            SOFTMAX_HEAD.train()
+
             BACKBONE.training = True
 
             losses = AverageMeter()
             top1 = AverageMeter()
             top5 = AverageMeter()
             losses_KL = AverageMeter()
-            var = AverageMeter()
-            p = AverageMeter()
+            # var = AverageMeter()
+            # p = AverageMeter()
             for inputs, labels in train_loader:
                 if (epoch + 1 <= NUM_EPOCH_WARM_UP) and (batch + 1 <= NUM_BATCH_WARM_UP): # adjust LR for each training batch during warm up
                     warm_up_lr(batch + 1, NUM_BATCH_WARM_UP, self.dul_args.lr, OPTIMIZER)
@@ -211,9 +217,9 @@ class DUL_Trainer():
                 
                 # mu_dul, std_dul = BACKBONE(inputs) # namely, mean and std
                 mu_dul,var_dul = BACKBONE(inputs) 
-
+                std_dul = torch.sqrt(var_dul)
                 epsilon = torch.randn_like(std_dul)
-                features = mu_dul + epsilon * torch.sqrt(std_dul)
+                features = mu_dul + epsilon * std_dul
                 loss_cls = SOFTMAX_HEAD(features, labels)
 
                 # 记录selected_classes的variance
@@ -224,7 +230,7 @@ class DUL_Trainer():
                 if torch.isnan(loss_kl):
                     print("loss_kl is nan ")
                 # outputs =HEAD(mu_dul,std_dul)
-                outputs =HEAD(mu_dul,var_dul)
+                outputs =HEAD(SOFTMAX_HEAD.weight,mu_dul,var_dul)
                 loss_head = LOSS(outputs, labels)
                 loss += loss_head
                 # 添加正则项，让方差尽可能大
@@ -233,11 +239,11 @@ class DUL_Trainer():
 
                 if torch.isnan(loss):
                     print("loss is nan,save tensor")
-                    torch.save(outputs,'outputs.pt')
-                    torch.save(HEAD.center, 'center.pt')
-                    torch.save(HEAD.weight,'weight.pt')
-                    torch.save(mu_dul, 'mu_dul.pt')
-                    torch.save(var_dul, 'val_dul.pt')
+                    # torch.save(outputs,'outputs.pt')
+                    # torch.save(HEAD.center, 'center.pt')
+                    # torch.save(HEAD.weight,'weight.pt')
+                    # torch.save(mu_dul, 'mu_dul.pt')
+                    # torch.save(var_dul, 'val_dul.pt')
                     return
 
                 # measure accuracy and record loss
@@ -253,17 +259,17 @@ class DUL_Trainer():
                 OPTIMIZER.step()
 
                 # 使用tensorboard记录特定类别的variance和weight
-                selected_classes = range(5)
-                for c in selected_classes:
-                    mask = labels == c
-                    var_c = var_dul[mask]
-                    # 将相对索引转为绝对索引
-                    indices = labels[mask].long()
-                    w_c = HEAD.weight[indices]
-                    if var_c.numel() == 0:
-                        continue
-                    writer.add_scalar("var_{}".format(c),var_c.mean(),global_step=batch)
-                    writer.add_scalar("weight_{}".format(c),w_c.mean(),global_step=batch)
+                # selected_classes = range(5)
+                # for c in selected_classes:
+                #     mask = labels == c
+                #     var_c = var_dul[mask]
+                #     # 将相对索引转为绝对索引
+                #     indices = labels[mask].long()
+                #     w_c = HEAD.weight[indices]
+                #     if var_c.numel() == 0:
+                #         continue
+                #     writer.add_scalar("var_{}".format(c),var_c.mean(),global_step=batch)
+                #     writer.add_scalar("weight_{}".format(c),w_c.mean(),global_step=batch)
 
                 # dispaly training loss & acc every DISP_FREQ
                 if ((batch + 1) % DISP_FREQ == 0) and batch != 0:
@@ -283,9 +289,6 @@ class DUL_Trainer():
             epoch_acc = top1.avg
             writer.add_scalar("Training_Loss", epoch_loss, epoch + 1)
             writer.add_scalar("Training_Accuracy", epoch_acc, epoch + 1)
-            # writer.add_scalar("Epoch_Var", var, epoch + 1)
-            # writer.add_histogram("weight_500",HEAD.weight2.sum(dim=1)[:500])
-            # writer.add_histogram("logP_500",outputs[-1,:500])
             print("=" * 60, flush=True)
             print('Epoch: {}/{}\t'
                   'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
