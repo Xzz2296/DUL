@@ -249,23 +249,25 @@ class Density_Softmax(nn.Module):
         self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
         # nn.init.xavier_uniform_(self.center)
         nn.init.xavier_uniform_(self.weight)
+        # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
 
     def forward(self,center, mu, var):
         # 优化后的运算
         # center = self.center
         weight = abs(self.weight)
         # 统计weight 第1个维度 即C维度中有多少为0，有多少不为0
-        nonzero_ratio = torch.sum(weight != 0,dim=1)/weight.shape[1]
+        
         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
         temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
         temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
         temp_mu_center = F.linear(mu/var, center) # B*C  计算mu*center/std^2
+
         exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
         density = (temp_mu_w * exp_term) # B*C
+        
         temp_sum = temp_mu.sum(dim=1).unsqueeze(1)+temp_center +temp_mu_center
-        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-4 # 防止分母出现0
-        output = (density/density_denominator)
-        output = (output.sum()/(mu.shape[0] * nonzero_ratio.sum() + 1e-8)).clamp(max =20)
+        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-8 # 防止分母出现0
+        output = (density/density_denominator)# 不加clamp 可能出现+inf
         return output
 
 # class Density_Softmax(nn.Module):

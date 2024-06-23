@@ -2,11 +2,17 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:2048"
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+# from torch.utils.data import Dataset
+import datetime
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.optim.optimizer import Optimizer
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+
 
 from config import Backbone_Dict, dul_args_func
 from head.metrics import ArcFace, CosFace, SphereFace, Am_softmax, Softmax,Density_Softmax
@@ -21,6 +27,14 @@ import time
 import numpy as np
 from PIL import Image
 import random
+
+# 初始化进程组
+dist.init_process_group(backend='nccl', init_method='env://')
+# 设置本地设备
+local_rank = int(os.environ['LOCAL_RANK'])
+torch.cuda.set_device(local_rank)
+device = torch.device("cuda", local_rank)
+
 
 
 class DUL_Trainer():
@@ -66,12 +80,14 @@ class DUL_Trainer():
         ])
 
         dataset_train = datasets.ImageFolder(self.dul_args.trainset_folder, train_transform)
+        # dataset_train = Dataset(self.dul_args.trainset_folder, train_transform)
 
         # ----- create a weighted random sampler to process imbalanced data
         weights = make_weights_for_balanced_classes(dataset_train.imgs, len(dataset_train.classes))
         weights = torch.DoubleTensor(weights)
-        sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(weights))
-
+        # sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(weights))
+        # 包装数据集
+        sampler = DistributedSampler(dataset_train)
         train_loader = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler, batch_size=self.dul_args.batch_size,
             pin_memory=self.dul_args.pin_memory, num_workers=self.dul_args.num_workers,
@@ -85,7 +101,7 @@ class DUL_Trainer():
         print('=' * 60)
         print("Number of Training Images: '{}' ".format(len(train_loader.dataset)))
 
-        return train_loader, num_class
+        return train_loader, num_class, sampler
 
 
     def _model_loader(self, num_class):
@@ -105,8 +121,7 @@ class DUL_Trainer():
             'Density':Density_Softmax(in_features = self.dul_args.embedding_size, out_features = num_class)
         }
         HEAD = Head_Dict[self.dul_args.head_name]
-        # SOFTMAX_HEAD = Head_Dict['Softmax']
-        SOFTMAX_HEAD = Head_Dict['ArcFace']
+        SOFTMAX_HEAD = Head_Dict['Softmax']
         print("=" * 60)
         print("Head Generated: '{}' ".format(self.dul_args.head_name))
 
@@ -172,9 +187,17 @@ class DUL_Trainer():
     def _dul_runner(self):
         writer = self._report_configurations()
 
-        train_loader, num_class = self._data_loader()
+        train_loader, num_class,train_sampler = self._data_loader()
 
         BACKBONE, HEAD,SOFTMAX_HEAD, LOSS, OPTIMIZER = self._model_loader(num_class=num_class)
+
+        device = torch.device("cuda:{}".format(local_rank))
+        BACKBONE.to(device)
+        ddp_backbone = DDP(BACKBONE, device_ids=[local_rank], output_device=local_rank)
+        # HEAD.to(device)
+        # SOFTMAX_HEAD.to(device)
+        # LOSS.to(device)
+
 
         DISP_FREQ = len(train_loader) // 100 # frequency to display training loss & acc
 
@@ -189,6 +212,7 @@ class DUL_Trainer():
         print('Start Training: ')
 
         for epoch in range(self.dul_args.num_epoch):
+            train_sampler.set_epoch(epoch)
             if epoch == self.dul_args.stages[0]:
                 schedule_lr(OPTIMIZER)
             elif epoch == self.dul_args.stages[1]:
@@ -206,6 +230,8 @@ class DUL_Trainer():
             top1 = AverageMeter()
             top5 = AverageMeter()
             losses_KL = AverageMeter()
+            # var = AverageMeter()
+            # p = AverageMeter()
             for inputs, labels in train_loader:
                 if (epoch + 1 <= NUM_EPOCH_WARM_UP) and (batch + 1 <= NUM_BATCH_WARM_UP): # adjust LR for each training batch during warm up
                     warm_up_lr(batch + 1, NUM_BATCH_WARM_UP, self.dul_args.lr, OPTIMIZER)
@@ -214,25 +240,28 @@ class DUL_Trainer():
                 labels = labels.cuda().long()
                 loss = 0
                 
-                mu_dul,var_dul = BACKBONE(inputs) 
+                # mu_dul, std_dul = BACKBONE(inputs) # namely, mean and std
+                # mu_dul,var_dul = BACKBONE(inputs) 
+                mu_dul,var_dul = ddp_backbone(inputs)
                 std_dul = torch.sqrt(var_dul)
                 epsilon = torch.randn_like(std_dul)
                 features = mu_dul + epsilon * std_dul
-                Softmax_outputs = SOFTMAX_HEAD(features, labels)
-                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul) - 1) * 0.5).mean() # KL损失
+                loss_cls = SOFTMAX_HEAD(features, labels)
+
+                # 记录selected_classes的variance
+                # assert(torch.all(not torch.isnan(var_dul) and var_dul>0))
+                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul) - 1) * 0.5).mean()
                 losses_KL.update(loss_kl.item(), inputs.size(0))
-                loss += self.dul_args.kl_scale * loss_kl #超参默认=0.01
+                loss += self.dul_args.kl_scale * loss_kl
                 if torch.isnan(loss_kl):
                     print("loss_kl is nan ")
-                # SOFTMAX_HEAD :Softmax 或arcface 分类头
-                # HEAD :计算混合高斯分布概率结果->(B *C)
+                # outputs =HEAD(mu_dul,std_dul)
                 outputs =HEAD(SOFTMAX_HEAD.weight,mu_dul,var_dul)
-                Nonezero_ratio =(torch.sum(HEAD.weight != 0,dim=1)/HEAD.weight.shape[1]).sum() # 记录非0元素比例之和 范围为[0,Class]
-                loss_confidence = (outputs.sum() / ((self.dul_args.batch_size * Nonezero_ratio) + 1e-8)).clamp(max= 20) # 对置信度结果根据非0元素比例求平均
-                loss_cls = LOSS(Softmax_outputs,labels) # 分类头Softmax/ArcFace的分类交叉熵损失
-                loss -= self.dul_args.conf_scale *loss_confidence # 置信度损失 超参系数=0.5
-                loss += loss_cls       # 分类损失 未添加超参即系数为1.0
-                loss -= self.dul_args.var_scale * var_dul.mean() # 添加L2正则项，让方差尽可能大 超参系数=0.5
+                loss_head = LOSS(outputs, labels)
+                loss += loss_head
+                # 添加正则项，让方差尽可能大
+                loss_var = var_dul.mean()
+                loss -= loss_var
 
                 if torch.isnan(loss):
                     print("loss is nan,save tensor")
@@ -245,7 +274,7 @@ class DUL_Trainer():
 
                 # measure accuracy and record loss
                 prec1, prec5 = accuracy(outputs.data, labels, topk = (1, 5))
-                losses.update(loss_cls.data.item(), inputs.size(0))
+                losses.update(loss_head.data.item(), inputs.size(0))
                 top1.update(prec1.data.item(), inputs.size(0))
                 top5.update(prec5.data.item(), inputs.size(0))
 
@@ -286,9 +315,6 @@ class DUL_Trainer():
             epoch_acc = top1.avg
             writer.add_scalar("Training_Loss", epoch_loss, epoch + 1)
             writer.add_scalar("Training_Accuracy", epoch_acc, epoch + 1)
-            # writer.add_scalar("Epoch_Var", var, epoch + 1)
-            # writer.add_histogram("weight_500",HEAD.weight2.sum(dim=1)[:500])
-            # writer.add_histogram("logP_500",outputs[-1,:500])
             print("=" * 60, flush=True)
             print('Epoch: {}/{}\t'
                   'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -310,6 +336,7 @@ class DUL_Trainer():
         print('Training process finished!', flush=True)
         print('=' * 60, flush=True)
 
+        dist.destroy_process_group()
 
 if __name__ == '__main__':
     dul_train = DUL_Trainer(dul_args_func())
