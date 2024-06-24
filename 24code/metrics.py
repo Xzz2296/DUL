@@ -246,17 +246,13 @@ class Density_Softmax(nn.Module):
         super(Density_Softmax, self).__init__()
         # self.center = Parameter(torch.FloatTensor(out_features, in_features))
         # self.center = center
-        self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+        # self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
         # nn.init.xavier_uniform_(self.center)
-        nn.init.xavier_uniform_(self.weight)
+        # nn.init.xavier_uniform_(self.weight)
         # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
 
-    def forward(self,center, mu, var):
-        # 优化后的运算
-        # center = self.center
-        weight = abs(self.weight)
-        # 统计weight 第1个维度 即C维度中有多少为0，有多少不为0
-        
+    def forward(self,center, mu, var,labels):
+        weight = abs(center).detach() # weight 复用center，可以选择detach
         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
         temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
         temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
@@ -267,8 +263,10 @@ class Density_Softmax(nn.Module):
         
         temp_sum = temp_mu.sum(dim=1).unsqueeze(1)+temp_center +temp_mu_center
         density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-8 # 防止分母出现0
-        output = (density/density_denominator)# 不加clamp 可能出现+inf
-        return output
+        output = (density/density_denominator).clamp(max =1)# 不加clamp 可能出现+inf, 此处进行归一化表示概率,clamp max 设置为1
+
+        selected_output = output.gather(1,labels.view(-1,1)).squeeze(1) #第1维度取出对应label的概率，squeeze去掉维度为1的维度 -> B
+        return selected_output
 
 # class Density_Softmax(nn.Module):
 #     '''

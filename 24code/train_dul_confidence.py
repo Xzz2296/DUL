@@ -219,19 +219,18 @@ class DUL_Trainer():
                 epsilon = torch.randn_like(std_dul)
                 features = mu_dul + epsilon * std_dul
                 Softmax_outputs = SOFTMAX_HEAD(features, labels)
-                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul) - 1) * 0.5).mean() # KL损失
+                loss_kl = ((var_dul + mu_dul ** 2 - torch.log(var_dul) - 1) * 0.5).mean() # KL损失 此处考虑添加w
                 losses_KL.update(loss_kl.item(), inputs.size(0))
-                loss += self.dul_args.kl_scale * loss_kl #超参默认=0.01
+                loss += self.dul_args.kl_scale * loss_kl        #超参默认=0.01
                 if torch.isnan(loss_kl):
                     print("loss_kl is nan ")
                 # SOFTMAX_HEAD :Softmax 或arcface 分类头
-                # HEAD :计算混合高斯分布概率结果->(B *C)
-                outputs =HEAD(SOFTMAX_HEAD.weight,mu_dul,var_dul)
-                Nonezero_ratio =(torch.sum(HEAD.weight != 0,dim=1)/HEAD.weight.shape[1]).sum() # 记录非0元素比例之和 范围为[0,Class]
-                loss_confidence = (outputs.sum() / ((self.dul_args.batch_size * Nonezero_ratio) + 1e-8)).clamp(max= 20) # 对置信度结果根据非0元素比例求平均
-                loss_cls = LOSS(Softmax_outputs,labels) # 分类头Softmax/ArcFace的分类交叉熵损失
+                # HEAD :计算混合高斯分布概率结果-> B
+                outputs =HEAD(SOFTMAX_HEAD.weight,mu_dul,var_dul,labels) # 计算混合高斯分布概率在对应类别的结果 ->B
+                loss_confidence = outputs.mean()                 # 置信度损失
+                loss_cls = LOSS(Softmax_outputs,labels)          # 分类头Softmax/ArcFace的分类交叉熵损失
                 loss -= self.dul_args.conf_scale *loss_confidence # 置信度损失 超参系数=0.5
-                loss += loss_cls       # 分类损失 未添加超参即系数为1.0
+                loss += loss_cls                                 # 分类损失 未添加超参即系数为1.0
                 loss -= self.dul_args.var_scale * var_dul.mean() # 添加L2正则项，让方差尽可能大 超参系数=0.5
 
                 if torch.isnan(loss):
@@ -244,12 +243,11 @@ class DUL_Trainer():
                     return
 
                 # measure accuracy and record loss
-                prec1, prec5 = accuracy(outputs.data, labels, topk = (1, 5))
+                prec1, prec5 = accuracy(Softmax_outputs.data, labels, topk = (1, 5))
                 losses.update(loss_cls.data.item(), inputs.size(0))
                 top1.update(prec1.data.item(), inputs.size(0))
                 top5.update(prec5.data.item(), inputs.size(0))
 
-                # var.update(loss_var.item(), inputs.size(0))
                 # compute gradient and do SGD step
                 OPTIMIZER.zero_grad()
                 loss.backward()
@@ -286,9 +284,6 @@ class DUL_Trainer():
             epoch_acc = top1.avg
             writer.add_scalar("Training_Loss", epoch_loss, epoch + 1)
             writer.add_scalar("Training_Accuracy", epoch_acc, epoch + 1)
-            # writer.add_scalar("Epoch_Var", var, epoch + 1)
-            # writer.add_histogram("weight_500",HEAD.weight2.sum(dim=1)[:500])
-            # writer.add_histogram("logP_500",outputs[-1,:500])
             print("=" * 60, flush=True)
             print('Epoch: {}/{}\t'
                   'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
