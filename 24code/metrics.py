@@ -254,7 +254,8 @@ class Density_Softmax(nn.Module):
     def forward(self,center, mu, var):
         # 优化后的运算
         # center = self.center
-        weight = abs(self.weight)
+        # weight = abs(self.weight)
+        weight = abs(center) # 可以选择detach
         # 统计weight 第1个维度 即C维度中有多少为0，有多少不为0
         
         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
