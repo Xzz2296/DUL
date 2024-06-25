@@ -242,7 +242,7 @@ class Density_Softmax(nn.Module):
     '''
     返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
     '''
-    def __init__(self,out_features,in_features):
+    def __init__(self,in_features,out_features,):
         super(Density_Softmax, self).__init__()
         # self.center = Parameter(torch.FloatTensor(out_features, in_features))
         # self.center = center
@@ -252,21 +252,23 @@ class Density_Softmax(nn.Module):
         # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
 
     def forward(self,center, mu, var,labels):
-        weight = abs(center).detach() # weight 复用center，可以选择detach
+        center = center.T
+        weight = abs(center).detach() # weight 复用center，可以选择detach # d * c
+        select_weight = weight[labels]          # B * dim
+        dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
+        density = select_weight* torch.exp(-dis)  # B * dim
+
         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
-        temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
-        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2) # B*C  计算center^2/std^2
-        temp_mu_center = F.linear(mu/var, center) # B*C  计算mu*center/std^2
+        # temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
+        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2).sum(dim=1).unsqueeze(1) # B*C ->B*1  计算center^2/std^2
+        temp_mu_center = F.linear(mu/var, center).sum(dim=1).unsqueeze(1) # B*C -> B*1 计算mu*center/std^2
+        all_density = torch.exp(temp_mu +temp_center+temp_mu_center -torch.max(temp_mu+temp_center+temp_mu_center)).sum(dim=1).unsqueeze(1) # B * D -> B
 
-        exp_term = torch.exp(temp_center+temp_mu_center -torch.max(temp_center+temp_mu_center)) # 防止出现inf
-        density = (temp_mu_w * exp_term) # B*C
-        
-        temp_sum = temp_mu.sum(dim=1).unsqueeze(1)+temp_center +temp_mu_center
-        density_denominator = torch.exp(temp_sum - torch.max(temp_sum)).sum(dim=1).unsqueeze(1) + 1e-8 # 防止分母出现0
-        output = (density/density_denominator).clamp(max =1)# 不加clamp 可能出现+inf, 此处进行归一化表示概率,clamp max 设置为1
-
-        selected_output = output.gather(1,labels.view(-1,1)).squeeze(1) #第1维度取出对应label的概率，squeeze去掉维度为1的维度 -> B
-        return selected_output
+        output = (density/(all_density + 1e-8)) # B * dim  -> P
+        output = torch.log(output + 1e-8) # B * dim -> logP
+        # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
+        # output = (density/density_denominator).mean(dim=1) # B    
+        return output
 
 # class Density_Softmax(nn.Module):
 #     '''
@@ -557,9 +559,10 @@ if __name__ == "__main__":
     # circle_loss = criterion(inp_sp, inp_sn)
 
     # print(circle_loss)
-    head = Density_Softmax(512, 10)
-    softmax_head = Softmax(10, 512, None)
-    mu = torch.rand(256, 10)
-    std = torch.rand(256, 10)
-    output = head(head.weight,mu, std).mean()
+    head = Density_Softmax(10, 512) # 512维特征，10个类别
+    softmax_head = Softmax(10, 512, None) # 10个类别，512维dim
+    mu = torch.rand(256, 512) # B *D 256个样本，512个dim
+    std = torch.rand(256, 512)# B *D 256个样本，512个dim
+    labels = torch.randint(high=10, size=(256,))
+    output = head(softmax_head.weight,mu, std,labels)
     print(output)
