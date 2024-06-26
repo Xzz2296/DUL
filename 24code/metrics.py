@@ -203,40 +203,6 @@ class Softmax(nn.Module):
 #         density = -0.5*(weight2 * (temp_mu + temp_weight - temp_mu_weight) + torch.sum(torch.log(var), dim=1).unsqueeze(1)) + self.bias
 #         return density
 
-# class Density_Softmax(nn.Module):
-#     '''
-#     返回正态分布概率密度并取对数,方便后续计算 0524版本
-#     '''
-#     def __init__(self,out_features,in_features):
-#         super(Density_Softmax, self).__init__()
-#         # self.weight =softmax_head.weight
-#         self.weight = Parameter(torch.FloatTensor(out_features, in_features))
-#         self.weight2 = Parameter(torch.FloatTensor(out_features, in_features)) 
-#         nn.init.xavier_uniform_(self.weight)
-#         nn.init.xavier_uniform_(self.weight2)
-#         # 一个常数
-#         self.bias =  torch.log(torch.tensor(2.0 * torch.pi))
-#         # self.bias =  torch.log(torch.tensor(100.0 / torch.pi))
-
-#     def forward(self, mu, var):
-#         # 优化后的运算
-#         # 计算mu^2/std^2
-#         weight = self.weight
-#         # weight2 =abs(self.weight2)
-#         # 使用sigmoid激活
-#         weight2 =nn.functional.sigmoid(self.weight2)
-
-#         # temp_mu = (mu**2 / var).sum(dim=1).unsqueeze(1)
-#         temp_mu_clamped = torch.exp(((mu **2/var)).clamp(max= 10)) # B*dim
-#         temp_mu = torch.log(torch.clamp(F.linear(temp_mu_clamped, weight2),min=1e-8)) # B*C
-#         # print(temp_mu)
-#         # 计算weight^2/std^2
-#         temp_weight = F.linear(torch.reciprocal(var) , weight**2)
-#         # temp_weight = F.linear(torch.reciprocal(var) , (self.weight)**2)
-#         # 计算mu*weight/std^2
-#         temp_mu_weight = 2 * F.linear(mu/var, weight)
-#         density = -0.5*((temp_mu + temp_weight - temp_mu_weight) + torch.sum(torch.log(var), dim=1).unsqueeze(1)) + self.bias
-#         return density
     
 class Density_Softmax(nn.Module):
     '''
@@ -251,9 +217,8 @@ class Density_Softmax(nn.Module):
         # nn.init.xavier_uniform_(self.weight)
         # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
 
-    def forward(self,center, mu, var,labels):
-        center = center.T
-        weight = abs(center).detach() # weight 复用center，可以选择detach # d * c
+    def forward(self,center, mu, var,labels): # center: c *dim
+        weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
         select_weight = weight[labels]          # B * dim
         dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
         density = select_weight* torch.exp(-dis)  # B * dim
@@ -268,6 +233,55 @@ class Density_Softmax(nn.Module):
         output = torch.log(output + 1e-8) # B * dim -> logP
         # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
         # output = (density/density_denominator).mean(dim=1) # B    
+        return output
+
+
+class Density_Softmax(nn.Module):
+    '''
+    用分块循环的方式计算按类别求和结果 B*C*D -> B*D
+    '''
+    def __init__(self,in_features,out_features,):
+        super(Density_Softmax, self).__init__()
+
+    def forward(self,center, mu, var,labels): # center: c *dim
+        
+        batch_size = mu.shape[0]
+        class_num = center.shape[0]
+        dim_size = center.shape[1]
+        weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
+        select_weight = weight[labels]          # B * dim
+        dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
+        density = select_weight* torch.exp(-dis)  # B * dim
+        nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))/dim_size).unsqueeze(1) # B 计算非零元素个数
+        
+        # # 窗口循环计算—— 所有类别求和版本
+        # all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D 
+        # chunk_size = 2                     # 每次计算的块大小
+        # n_chunks = class_num // chunk_size # 分块数
+        # weight_chunks = torch.chunk(weight, n_chunks, dim=0) # 分块
+        # mu = mu.unsqueeze(1)               # B * 1 * D
+        # for weight_chunk in weight_chunks: # 按块计算
+        #     cur_weight_chunk = weight_chunk.unsqueeze(0)                        # 1 * chunk_size * D
+        #     temp_result = ((cur_weight_chunk - mu) ** 2 ).sum(dim=1) /(2 * var) # B * D
+        #     all_class_density += temp_result 
+
+        # 窗口循环计算—— 选择topk类别求和版本
+        all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D
+        chunk_size = 2                     # 每次计算的块大小
+        K = 5
+        n_chunks = batch_size // chunk_size # 分块数
+        select_weight_chunks = torch.chunk(select_weight, n_chunks, dim=0) # 分块
+        weight_expand = weight.unsqueeze(0)              # 1 *C *D
+        for select_weight_chunk in select_weight_chunks: # 按块计算
+            cur_weight_chunk = select_weight_chunk.unsqueeze(1)                 #  chunk_size *1 * D
+            weight_dis =abs(cur_weight_chunk - weight_expand).sum(dim = 2)             #  chunk_size *C  dim维度进行求和
+            _, indices = weight_dis.topk(K,dim= 1)                              #  chunk_size *K
+            topk_weight = weight[:,indices[1]]                                     #  chunk_size * K * D
+
+            # all_class_density += temp_result                # B * 1 * D
+
+        output = (density/(all_class_density + 1e-8)/nonzero_ratio) # B * dim  -> P
+        output = torch.log(output + 1e-8)             # B * dim -> logP  
         return output
 
 # class Density_Softmax(nn.Module):
@@ -559,8 +573,8 @@ if __name__ == "__main__":
     # circle_loss = criterion(inp_sp, inp_sn)
 
     # print(circle_loss)
-    head = Density_Softmax(10, 512) # 512维特征，10个类别
-    softmax_head = Softmax(10, 512, None) # 10个类别，512维dim
+    head = Density_Softmax(512, 10) # 512维特征，10个类别
+    softmax_head = Softmax(512, 10, None) # 10个类别，512维dim
     mu = torch.rand(256, 512) # B *D 256个样本，512个dim
     std = torch.rand(256, 512)# B *D 256个样本，512个dim
     labels = torch.randint(high=10, size=(256,))
