@@ -242,6 +242,7 @@ class Density_Softmax(nn.Module):
     '''
     def __init__(self,in_features,out_features,):
         super(Density_Softmax, self).__init__()
+        self.topk = True
 
     def forward(self,center, mu, var,labels): # center: c *dim
         
@@ -253,36 +254,57 @@ class Density_Softmax(nn.Module):
         dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
         density = select_weight* torch.exp(-dis)  # B * dim
         nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))/dim_size).unsqueeze(1) # B 计算非零元素个数
-        
-        # # 窗口循环计算—— 所有类别求和版本
-        # all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D 
-        # chunk_size = 2                     # 每次计算的块大小
-        # n_chunks = class_num // chunk_size # 分块数
-        # weight_chunks = torch.chunk(weight, n_chunks, dim=0) # 分块
-        # mu = mu.unsqueeze(1)               # B * 1 * D
-        # for weight_chunk in weight_chunks: # 按块计算
-        #     cur_weight_chunk = weight_chunk.unsqueeze(0)                        # 1 * chunk_size * D
-        #     temp_result = ((cur_weight_chunk - mu) ** 2 ).sum(dim=1) /(2 * var) # B * D
-        #     all_class_density += temp_result 
+        mu = mu.unsqueeze(1)                      # B * 1 * dim
+
+        if not self.topk:
+        # 窗口循环计算—— 所有类别求和版本
+            all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D 
+            chunk_size = 2                     # 每次计算的块大小
+            n_chunks = class_num // chunk_size # 分块数
+            weight_chunks = torch.chunk(weight, n_chunks, dim=0) # 分块
+            
+            for weight_chunk in weight_chunks: # 按块计算
+                cur_weight_chunk = weight_chunk.unsqueeze(0)                        # 1 * chunk_size * D
+                temp_result = ((cur_weight_chunk - mu) ** 2 ).sum(dim=1) /(2 * var) # B * D
+                all_class_density += temp_result 
+
+            output = (density/(all_class_density + 1e-8)/nonzero_ratio) # B * dim  -> P
+            output = torch.log(output + 1e-8)                           # B * dim -> logP  
+            return output
+
 
         # 窗口循环计算—— 选择topk类别求和版本
-        all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D
-        chunk_size = 2                     # 每次计算的块大小
-        K = 5
-        n_chunks = batch_size // chunk_size # 分块数
-        select_weight_chunks = torch.chunk(select_weight, n_chunks, dim=0) # 分块
-        weight_expand = weight.unsqueeze(0)              # 1 *C *D
-        for select_weight_chunk in select_weight_chunks: # 按块计算
-            cur_weight_chunk = select_weight_chunk.unsqueeze(1)                 #  chunk_size *1 * D
-            weight_dis =abs(cur_weight_chunk - weight_expand).sum(dim = 2)             #  chunk_size *C  dim维度进行求和
-            _, indices = weight_dis.topk(K,dim= 1)                              #  chunk_size *K
-            topk_weight = weight[:,indices[1]]                                     #  chunk_size * K * D
+        else:
+            topk_weight_list =[]
+            # chunk_size = 2                     # 每次计算的块大小
+            K = 5
+            # n_chunks = batch_size // chunk_size # 分块数
+            # select_weight_chunks = torch.chunk(select_weight, n_chunks, dim=0) # 分块
+            select_weight_expand = select_weight.unsqueeze(1) # B * 1 *D
+            weight_expand = weight.unsqueeze(0)               # 1 * C *D
+            # 对dim维度进行求和
+            select_weight_term = (select_weight** 2).sum(dim = 1).unsqueeze(dim=1)      # B * D -> B * 1
+            weight_term = (weight ** 2).sum(dim = 1).unsqueeze(dim=0)                   # C * D -> 1 * C
+            weight_select_weight = F.linear(select_weight, weight.t())                  # B * C
+            weight_dis = select_weight_term - 2 * weight_select_weight + weight_term    # B * C
+            _, indices = (-weight_dis).topk(K,dim = 1)                                  # topk -> B * K
+            indices_expand = indices.unsqueeze(-1).expand(-1,-1,dim_size)               # B * K * D
 
-            # all_class_density += temp_result                # B * 1 * D
 
-        output = (density/(all_class_density + 1e-8)/nonzero_ratio) # B * dim  -> P
-        output = torch.log(output + 1e-8)             # B * dim -> logP  
-        return output
+            # for select_weight_chunk in select_weight_chunks: # 按块计算
+            #     cur_weight_chunk = select_weight_chunk.unsqueeze(1)                        #  chunk_size *1 * D
+            #     weight_dis =abs(cur_weight_chunk - weight_expand).sum(dim = 2)             #  chunk_size *C  dim维度进行求和
+            #     _, indices = weight_dis.topk(K,dim= 1)                                     #  topk 与排序作用一致
+            #     indices_expand = indices.unsqueeze(-1).expand(-1,-1,dim_size)              #  chunk_size * K * D
+            #     cur_topk_weight = weight.expand(chunk_size,-1,-1).gather(1,indices_expand) #  chunk_size * K * D
+            #     topk_weight_list.append(cur_topk_weight)
+
+            topk_weight = torch.cat(topk_weight_list,dim=0)             # B *K *D
+            dis = ((topk_weight - mu) ** 2) /(2 * var)                  # B *K *D
+            topk_density =torch.exp(-dis).sum(dim=1)                    # B *D
+            output = (density/(topk_density + 1e-8)/nonzero_ratio)      # B *D  -> P
+            output = torch.log(output + 1e-8)                           # B *D  -> logP  
+            return output
 
 # class Density_Softmax(nn.Module):
 #     '''
