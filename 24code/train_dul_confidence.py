@@ -236,10 +236,10 @@ class DUL_Trainer():
                 if torch.isnan(loss):
                     print("loss is nan,save tensor")
                     # torch.save(outputs,'outputs.pt')
-                    # torch.save(HEAD.center, 'center.pt')
+                    torch.save(SOFTMAX_HEAD.weight, 'center.pt')
                     # torch.save(HEAD.weight,'weight.pt')
-                    # torch.save(mu_dul, 'mu_dul.pt')
-                    # torch.save(var_dul, 'val_dul.pt')
+                    torch.save(mu_dul, 'mu_dul.pt')
+                    torch.save(var_dul, 'val_dul.pt')
                     return
 
                 # measure accuracy and record loss

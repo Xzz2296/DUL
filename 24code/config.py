@@ -52,7 +52,7 @@ def dul_args_func():
     parser.add_argument('--num_workers', type=int, default=12)
     
     # ----- hyperparameters
-    parser.add_argument('--batch_size', type=int, default=400)
+    parser.add_argument('--batch_size', type=int, default=420)
     parser.add_argument('--num_epoch', type=int, default=22)
     parser.add_argument('--warm_up_epoch', type=int, default=1)
     parser.add_argument('--image_noise', type=float, default=0)
