@@ -1,5 +1,6 @@
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:2048"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segment:true"
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -18,9 +19,9 @@ from util.utils import make_weights_for_balanced_classes, separate_irse_bn_paras
 from tensorboardX import SummaryWriter, writer
 import os
 import time
-import numpy as np
-from PIL import Image
-import random
+# import numpy as np
+# from PIL import Image
+# import random
 
 
 class DUL_Trainer():
@@ -206,6 +207,10 @@ class DUL_Trainer():
             top1 = AverageMeter()
             top5 = AverageMeter()
             losses_KL = AverageMeter()
+            # losses_confidence = AverageMeter()
+            # losses_cls = AverageMeter()
+            # losses_var = AverageMeter()
+
             for inputs, labels in train_loader:
                 if (epoch + 1 <= NUM_EPOCH_WARM_UP) and (batch + 1 <= NUM_BATCH_WARM_UP): # adjust LR for each training batch during warm up
                     warm_up_lr(batch + 1, NUM_BATCH_WARM_UP, self.dul_args.lr, OPTIMIZER)
@@ -232,14 +237,15 @@ class DUL_Trainer():
                 loss -= self.dul_args.conf_scale *loss_confidence # 置信度损失 超参系数=0.5
                 loss += loss_cls                                 # 分类损失 未添加超参即系数为1.0
                 loss -= self.dul_args.var_scale * var_dul.mean() # 添加L2正则项，让方差尽可能大 超参系数=0.5
+                # loss_copy = loss.clone().detach()
 
                 if torch.isnan(loss):
                     print("loss is nan,save tensor")
                     # torch.save(outputs,'outputs.pt')
-                    torch.save(SOFTMAX_HEAD.weight, 'center.pt')
+                    # torch.save(HEAD.center, 'center.pt')
                     # torch.save(HEAD.weight,'weight.pt')
-                    torch.save(mu_dul, 'mu_dul.pt')
-                    torch.save(var_dul, 'val_dul.pt')
+                    # torch.save(mu_dul, 'mu_dul.pt')
+                    # torch.save(var_dul, 'val_dul.pt')
                     return
 
                 # measure accuracy and record loss
@@ -247,6 +253,10 @@ class DUL_Trainer():
                 losses.update(loss_cls.data.item(), inputs.size(0))
                 top1.update(prec1.data.item(), inputs.size(0))
                 top5.update(prec5.data.item(), inputs.size(0))
+                # losses_confidence.update(loss_confidence.data.item(), inputs.size(0))
+                # losses_cls.update(loss_cls.item(), inputs.size(0))
+                # losses_var.update(var_dul.mean().item(), inputs.size(0))
+
 
                 # compute gradient and do SGD step
                 OPTIMIZER.zero_grad()
@@ -273,17 +283,26 @@ class DUL_Trainer():
                           'Time {}\t'
                           'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                           'Training Loss_KL {loss_KL.val:.4f} ({loss_KL.avg:.4f})\t'
+                        #   'Training Loss_Confidence {loss_confidence.val:.4f} ({loss_confidence.avg:.4f})\t'
+                        #   'Training Loss_Cls {loss_cls.val:.4f} ({loss_cls.avg:.4f})\t'
+                        #   'Training Loss_Var {loss_var.val:.4f} ({loss_var.avg:.4f})\t'
                           'Training Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                           'Training Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                        #   'Var Value{var.val:.3f}({var.avg:.3f})'.format(
                         epoch + 1, self.dul_args.num_epoch, batch + 1, len(train_loader) * self.dul_args.num_epoch, time.asctime(time.localtime(time.time())), loss = losses, loss_KL=losses_KL,  top1 = top1, top5 = top5), flush=True)
 
                 batch += 1 # batch index
             # training statistics per epoch (buffer for visualization)
             epoch_loss = losses.avg
+            # epoch_loss_KL = losses_KL.avg
+            # epoch_loss_confidence = losses_confidence.avg
+            # epoch_loss_cls = losses_cls.avg
             epoch_acc = top1.avg
             writer.add_scalar("Training_Loss", epoch_loss, epoch + 1)
             writer.add_scalar("Training_Accuracy", epoch_acc, epoch + 1)
+            # writer.add_scalar("Training_Loss_KL", epoch_loss_KL, epoch + 1)
+            # writer.add_scalar("Training_Loss_Confidence", epoch_loss_confidence, epoch + 1)
+            # writer.add_scalar("Training_Loss_Cls", epoch_loss_cls, epoch + 1)
+            # writer.add_scalar("Training_Loss_Var", losses_var.avg, epoch + 1)
             print("=" * 60, flush=True)
             print('Epoch: {}/{}\t'
                   'Training Loss {loss.val:.4f} ({loss.avg:.4f})\t'
