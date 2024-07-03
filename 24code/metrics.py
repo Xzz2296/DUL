@@ -204,36 +204,36 @@ class Softmax(nn.Module):
 #         return density
 
     
-class Density_Softmax(nn.Module):
-    '''
-    返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
-    '''
-    def __init__(self,in_features,out_features,):
-        super(Density_Softmax, self).__init__()
-        # self.center = Parameter(torch.FloatTensor(out_features, in_features))
-        # self.center = center
-        # self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
-        # nn.init.xavier_uniform_(self.center)
-        # nn.init.xavier_uniform_(self.weight)
-        # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
+# class Density_Softmax(nn.Module):
+#     '''
+#     返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
+#     '''
+#     def __init__(self,in_features,out_features,):
+#         super(Density_Softmax, self).__init__()
+#         # self.center = Parameter(torch.FloatTensor(out_features, in_features))
+#         # self.center = center
+#         # self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+#         # nn.init.xavier_uniform_(self.center)
+#         # nn.init.xavier_uniform_(self.weight)
+#         # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
 
-    def forward(self,center, mu, var,labels): # center: c *dim
-        weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
-        select_weight = weight[labels]          # B * dim
-        dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
-        density = select_weight* torch.exp(-dis)  # B * dim
+#     def forward(self,center, mu, var,labels): # center: c *dim
+#         weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
+#         select_weight = weight[labels]          # B * dim
+#         dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
+#         density = select_weight* torch.exp(-dis)  # B * dim
 
-        temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
-        # temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
-        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2).sum(dim=1).unsqueeze(1) # B*C ->B*1  计算center^2/std^2
-        temp_mu_center = F.linear(mu/var, center).sum(dim=1).unsqueeze(1) # B*C -> B*1 计算mu*center/std^2
-        all_density = torch.exp(temp_mu +temp_center+temp_mu_center -torch.max(temp_mu+temp_center+temp_mu_center)).sum(dim=1).unsqueeze(1) # B * D -> B
+#         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
+#         # temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
+#         temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2).sum(dim=1).unsqueeze(1) # B*C ->B*1  计算center^2/std^2
+#         temp_mu_center = F.linear(mu/var, center).sum(dim=1).unsqueeze(1) # B*C -> B*1 计算mu*center/std^2
+#         all_density = torch.exp(temp_mu +temp_center+temp_mu_center -torch.max(temp_mu+temp_center+temp_mu_center)).sum(dim=1).unsqueeze(1) # B * D -> B
 
-        output = (density/(all_density + 1e-8)) # B * dim  -> P
-        output = torch.log(output + 1e-8) # B * dim -> logP
-        # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
-        # output = (density/density_denominator).mean(dim=1) # B    
-        return output
+#         output = (density/(all_density + 1e-8)) # B * dim  -> P
+#         output = torch.log(output + 1e-8) # B * dim -> logP
+#         # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
+#         # output = (density/density_denominator).mean(dim=1) # B    
+#         return output
 
 
 class Density_Softmax(nn.Module):
@@ -276,9 +276,9 @@ class Density_Softmax(nn.Module):
 
         # 窗口循环计算—— 选择topk类别求和版本
         else:
-            K = 5 
-            select_weight_expand = select_weight.unsqueeze(1) # B * 1 *D
-            weight_expand = weight.unsqueeze(0)               # 1 * C *D
+            K = 128
+            # select_weight_expand = select_weight.unsqueeze(1) # B * 1 *D
+            # weight_expand = weight.unsqueeze(0)               # 1 * C *D
             # 对dim维度进行求和
             select_weight_term = (select_weight** 2).sum(dim = 1).unsqueeze(dim=1)      # B * D -> B * 1
             weight_term = (weight ** 2).sum(dim = 1).unsqueeze(dim=0)                   # C * D -> 1 * C
