@@ -263,23 +263,18 @@ class Density_Softmax(nn.Module):
         super(Density_Softmax, self).__init__()
         self.topk = True
 
-    def forward(self, center, mu, var, labels): # center: c *dim
-        
-        batch_size = mu.shape[0]
-        class_num = center.shape[0]
-        dim_size = center.shape[1]
-        weight = center
+    def forward(self, weight, mu, var, labels): # center: c *dim
         # weight = abs(center).detach()           # weight 复用center，可以选择detach # c *dim
-        select_weight = weight[labels]          # B * dim
-        dis = (select_weight - mu) ** 2 / (2 * var)# B * dim
-        density = abs(select_weight) * torch.exp(-dis)  # B * dim
+        sample_weight = weight[labels]          # B * dim
+        density = torch.exp(- (sample_weight - mu) ** 2 / (2 * var))# B * dim
         # nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))).unsqueeze(1) # B 计算非零元素个数
-        nonzeros = (select_weight != 0).sum(dim=-1, keepdim=True) # B 计算非零元素个数
-        mu = mu.unsqueeze(1)                      # B * 1 * dim
-        var = var.unsqueeze(1)                    # B * 1 * dim
+        nonzeros = (sample_weight != 0).sum(dim=-1, keepdim=True) # B 计算非零元素个数
 
         if not self.topk:
         # 窗口循环计算—— 所有类别求和版本// 计算图未发生变化，显存占用不变
+            batch_size = mu.shape[0]
+            class_num, dim_size = weight.size()
+
             all_class_density = torch.zeros(batch_size, dim_size).to(center.device) # B * D 
             chunk_size = 2                     # 每次计算的块大小
             n_chunks = class_num // chunk_size # 分块数
@@ -287,34 +282,39 @@ class Density_Softmax(nn.Module):
             
             for weight_chunk in weight_chunks: # 按块计算
                 cur_weight_chunk = weight_chunk.unsqueeze(0)                        # 1 * chunk_size * D
-                temp_result = ((cur_weight_chunk - mu) ** 2 ).sum(dim=1) /(2 * var) # B * D
+                temp_result = ((cur_weight_chunk - mu[:, None, :]) ** 2 ).sum(dim=1) /(2 * var[:, None, :]) # B * D
                 all_class_density += temp_result 
 
-            output = (density / (all_class_density + 1e-8) / nonzero_ratio) # B * dim  -> P
-            output = torch.log(output + 1e-8)                           # B * dim -> logP  
-            return output
+            confid = (density / (all_class_density + 1e-8) / nonzero_ratio) # B * dim  -> P
+            confid = torch.log(confid + 1e-8)                           # B * dim -> logP  
 
+            return confid 
         # 窗口循环计算—— 选择topk类别求和版本
         else:
-            K = 128
-            # select_weight_expand = select_weight.unsqueeze(1) # B * 1 *D
-            # weight_expand = weight.unsqueeze(0)               # 1 * C *D
-            # 对dim维度进行求和
-            indices = findConfounders(weight, select_weight, K)
-            # select_weight_term = (select_weight ** 2).sum(dim=1).unsqueeze(dim=1)     # B * D -> B * 1
-            # weight_term = (weight ** 2).sum(dim=1).unsqueeze(dim=0)                   # C * D -> 1 * C
-            # weight_select_weight = F.linear(select_weight, weight)                    # B * C
-            # weight_dis = select_weight_term - 2 * weight_select_weight + weight_term  # B * C
-            # _, indices = weight_dis.topk(K, dim=1, largest=True)                      # topk -> B * K
-            topk_weight = weight[indices.view(-1)].view(batch_size, K, dim_size)        # BK * D -> B* K * D
+            indices = findConfounders(weight, sample_weight, K=256)
+            topk_weight = weight[indices]        # BK * D -> B * K * D
 
-            dis = ((topk_weight - mu) ** 2) /(2 * var)                                  # B *K *D
-            topk_density = torch.clamp(torch.exp(-dis).sum(dim=1), min=1e-8)            # B *D
-            
-            output = (density / topk_density).sum(dim=-1) / torch.clamp(nonzeros, min=1)# B *D  -> P
-            output = torch.log(torch.clamp(output.mean(), min=1e-8))                    # B *D  -> logP  
+            topk_density = torch.exp(- (topk_weight - mu[:, None, :]) ** 2 / (2 * var[:, None, :]))   # B * K * D
+            total_density = torch.clamp(topk_density.sum(dim=1), min=1e-8)              # B * D
+           
+            _, _indices = topk_density.topk(2, dim=1, largest=True, sorted=True)
+ 
+            overly = (indices.gather(-1, _indices[:, 0]) == labels[:, None]) & ((density - topk_density.gather(1, _indices[:, 1][:, None, :]).squeeze()) >= 0.2 * total_density)
+            overly = overly.float()
+            confid = abs(sample_weight) * density / total_density * (1 - overly) 
 
-            return output
+            penalize = True 
+            if penalize:
+                density_detached = torch.exp(- (sample_weight - mu).detach() ** 2 / (2 * var))
+
+                topk_density_detached = torch.exp(- (topk_weight - mu[:, None, :]).detach() ** 2 / (2 * var[:, None, :]))   # B * K * D
+                total_density_detached = torch.clamp(topk_density_detached.sum(dim=1), min=1e-8)        #B * D
+
+                confid = confid - abs(sample_weight.detach()) * density_detached / total_density_detached * overly
+
+            confid = confid.sum(dim=-1) / torch.clamp(nonzeros, min=1)# B * D  -> P
+
+            return confid.mean()
 
 # class Density_Softmax(nn.Module):
 #     '''
