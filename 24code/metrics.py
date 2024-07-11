@@ -203,64 +203,84 @@ class Softmax(nn.Module):
 #         density = -0.5*(weight2 * (temp_mu + temp_weight - temp_mu_weight) + torch.sum(torch.log(var), dim=1).unsqueeze(1)) + self.bias
 #         return density
 
+"""    
+class Density_Softmax(nn.Module):
+    '''
+    返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
+    '''
+    def __init__(self,in_features,out_features,):
+        super(Density_Softmax, self).__init__()
+        # self.center = Parameter(torch.FloatTensor(out_features, in_features))
+        # self.center = center
+        # self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
+        # nn.init.xavier_uniform_(self.center)
+        # nn.init.xavier_uniform_(self.weight)
+        # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
+
+    def forward(self,center, mu, var,labels): # center: c *dim
+        weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
+        sample_weight = weight[labels]          # B * dim
+        dis = (sample_weight - mu) ** 2 /(2 * var)# B * dim
+        density = sample_weight* torch.exp(-dis)  # B * dim
+
+        temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
+        # temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
+        temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2).sum(dim=1).unsqueeze(1) # B*C ->B*1  计算center^2/std^2
+        temp_mu_center = F.linear(mu/var, center).sum(dim=1).unsqueeze(1) # B*C -> B*1 计算mu*center/std^2
+        all_density = torch.exp(temp_mu +temp_center+temp_mu_center -torch.max(temp_mu+temp_center+temp_mu_center)).sum(dim=1).unsqueeze(1) # B * D -> B
+
+        output = (density/(all_density + 1e-8)) # B * dim  -> P
+        output = torch.log(output + 1e-8) # B * dim -> logP
+        # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
+        # output = (density/density_denominator).mean(dim=1) # B    
+        return output
+
+"""
+
+import torch.nn.functional as F
+
+def findConfounders(w, sample_w, K, method="euc"):
+    if method == "euc": # Euclidean distance:  (W[None, :, :] - W[y][:, None, :])^2  : B * C * D
+       sample_w2 = (sample_w ** 2).sum(dim=1, keepdim=True)  # B * 1
+       w2 = (w ** 2).sum(dim=1)[None, :]                     # 1 * C
+       ww = 2 * torch.matmul(sample_w, w.T)                  # B * C
+       
+       dis = sample_w2 - ww + w2                             # B * C
+       
+       _, indices = dis.topk(K, dim=1)                       # topk -> B * K
+       
+    else:# Cosine similarity:
+       dis = F.cosine_similarity(sample_w[:, None, :], w[None, :, :], dim=-1)     # B * C
+       _, indices = dis.topk(K, dim=1, largest=True)                              # topk -> B * K  
     
-# class Density_Softmax(nn.Module):
-#     '''
-#     返回正态分布概率密度并取对数,方便后续计算 0606版本 0614-0616调试更新
-#     '''
-#     def __init__(self,in_features,out_features,):
-#         super(Density_Softmax, self).__init__()
-#         # self.center = Parameter(torch.FloatTensor(out_features, in_features))
-#         # self.center = center
-#         # self.weight = Parameter(torch.FloatTensor(out_features, in_features)) 
-#         # nn.init.xavier_uniform_(self.center)
-#         # nn.init.xavier_uniform_(self.weight)
-#         # self.nonzero_ratio = (torch.sum(self.weight != 0,dim=1)/self.weight.shape[1]).sum()
-
-#     def forward(self,center, mu, var,labels): # center: c *dim
-#         weight = abs(center).detach() # weight 复用center，可以选择detach # c *dim
-#         select_weight = weight[labels]          # B * dim
-#         dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
-#         density = select_weight* torch.exp(-dis)  # B * dim
-
-#         temp_mu = -0.5 *(mu **2 / var) # B*dim     计算mu^2/std^2
-#         # temp_mu_w = F.linear(torch.exp(temp_mu), weight) # B*C 乘权重
-#         temp_center = -0.5 * F.linear(torch.reciprocal(var) , center**2).sum(dim=1).unsqueeze(1) # B*C ->B*1  计算center^2/std^2
-#         temp_mu_center = F.linear(mu/var, center).sum(dim=1).unsqueeze(1) # B*C -> B*1 计算mu*center/std^2
-#         all_density = torch.exp(temp_mu +temp_center+temp_mu_center -torch.max(temp_mu+temp_center+temp_mu_center)).sum(dim=1).unsqueeze(1) # B * D -> B
-
-#         output = (density/(all_density + 1e-8)) # B * dim  -> P
-#         output = torch.log(output + 1e-8) # B * dim -> logP
-#         # density_denominator = torch.sum(density,dim=1).unsqueeze(1) 
-#         # output = (density/density_denominator).mean(dim=1) # B    
-#         return output
-
+    return indices
 
 class Density_Softmax(nn.Module):
     '''
     用分块循环的方式计算按类别求和结果 B*C*D -> B*D
     '''
-    def __init__(self,in_features,out_features,):
+    def __init__(self, in_features, out_features):
         super(Density_Softmax, self).__init__()
         self.topk = True
 
-    def forward(self,center, mu, var,labels): # center: c *dim
+    def forward(self, center, mu, var, labels): # center: c *dim
         
         batch_size = mu.shape[0]
         class_num = center.shape[0]
         dim_size = center.shape[1]
-
-        weight = abs(center).detach()           # weight 复用center，可以选择detach # c *dim
+        weight = center
+        # weight = abs(center).detach()           # weight 复用center，可以选择detach # c *dim
         select_weight = weight[labels]          # B * dim
-        dis = (select_weight - mu) ** 2 /(2 * var)# B * dim
-        density = select_weight* torch.exp(-dis)  # B * dim
-        nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))).unsqueeze(1) # B 计算非零元素个数
+        dis = (select_weight - mu) ** 2 / (2 * var)# B * dim
+        density = abs(select_weight) * torch.exp(-dis)  # B * dim
+        # nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))).unsqueeze(1) # B 计算非零元素个数
+        nonzeros = (select_weight != 0).sum(dim=-1, keepdim=True) # B 计算非零元素个数
         mu = mu.unsqueeze(1)                      # B * 1 * dim
         var = var.unsqueeze(1)                    # B * 1 * dim
 
         if not self.topk:
         # 窗口循环计算—— 所有类别求和版本// 计算图未发生变化，显存占用不变
-            all_class_density = torch.zeros(batch_size,dim_size).to(center.device) # B * D 
+            all_class_density = torch.zeros(batch_size, dim_size).to(center.device) # B * D 
             chunk_size = 2                     # 每次计算的块大小
             n_chunks = class_num // chunk_size # 分块数
             weight_chunks = torch.chunk(weight, n_chunks, dim=0) # 分块
@@ -270,7 +290,7 @@ class Density_Softmax(nn.Module):
                 temp_result = ((cur_weight_chunk - mu) ** 2 ).sum(dim=1) /(2 * var) # B * D
                 all_class_density += temp_result 
 
-            output = (density/(all_class_density + 1e-8)/nonzero_ratio) # B * dim  -> P
+            output = (density / (all_class_density + 1e-8) / nonzero_ratio) # B * dim  -> P
             output = torch.log(output + 1e-8)                           # B * dim -> logP  
             return output
 
@@ -280,18 +300,21 @@ class Density_Softmax(nn.Module):
             # select_weight_expand = select_weight.unsqueeze(1) # B * 1 *D
             # weight_expand = weight.unsqueeze(0)               # 1 * C *D
             # 对dim维度进行求和
-            select_weight_term = (select_weight** 2).sum(dim = 1).unsqueeze(dim=1)      # B * D -> B * 1
-            weight_term = (weight ** 2).sum(dim = 1).unsqueeze(dim=0)                   # C * D -> 1 * C
-            weight_select_weight = F.linear(select_weight, weight)                      # B * C
-            weight_dis = select_weight_term - 2 * weight_select_weight + weight_term    # B * C
-            _, indices = (-weight_dis).topk(K,dim = 1)                                  # topk -> B * K
-            topk_weight = weight[indices.view(-1)].view(batch_size,K,dim_size)          # BK * D -> B* K * D
+            indices = findConfounders(weight, select_weight, K)
+            # select_weight_term = (select_weight ** 2).sum(dim=1).unsqueeze(dim=1)     # B * D -> B * 1
+            # weight_term = (weight ** 2).sum(dim=1).unsqueeze(dim=0)                   # C * D -> 1 * C
+            # weight_select_weight = F.linear(select_weight, weight)                    # B * C
+            # weight_dis = select_weight_term - 2 * weight_select_weight + weight_term  # B * C
+            # _, indices = weight_dis.topk(K, dim=1, largest=True)                      # topk -> B * K
+            topk_weight = weight[indices.view(-1)].view(batch_size, K, dim_size)        # BK * D -> B* K * D
 
-            dis = ((topk_weight - mu) ** 2) /(2 * var)                  # B *K *D
-            topk_density =torch.exp(-dis).sum(dim=1)                    # B *D
-            output = (density/(topk_density + 1e-8)/nonzero_ratio)      # B *D  -> P
-            output = torch.log(output + 1e-8)                           # B *D  -> logP  
-            return output.mean()
+            dis = ((topk_weight - mu) ** 2) /(2 * var)                                  # B *K *D
+            topk_density = torch.clamp(torch.exp(-dis).sum(dim=1), min=1e-8)            # B *D
+            
+            output = (density / topk_density).sum(dim=-1) / torch.clamp(nonzeros, min=1)# B *D  -> P
+            output = torch.log(torch.clamp(output.mean(), min=1e-8))                    # B *D  -> logP  
+
+            return output
 
 # class Density_Softmax(nn.Module):
 #     '''

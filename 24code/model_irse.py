@@ -47,7 +47,7 @@ class DUL_Backbone(nn.Module):
         mu_dul = self.mu_dul_backbone(x)
         logvar_dul = self.logvar_dul_backbone(x)
         val_dul =logvar_dul.exp()
-        val_dul = torch.clamp(val_dul,min =1e-8,max =1e20)
+        val_dul = torch.clamp(val_dul,min =1e-8,max =10.0)
         # val_dul = torch.clamp(val_dul,min =1e-8,max =1.0)
         return mu_dul, val_dul
 
