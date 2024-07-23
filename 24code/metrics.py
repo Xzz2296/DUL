@@ -76,26 +76,41 @@ class Softmax(nn.Module):
         nn.init.xavier_uniform_(self.weight)
         nn.init.zeros_(self.bias)
 
-    def forward(self, x, label):
-        if self.device_id == None:
-            # out = F.linear(x, self.weight, self.bias)
-            out =F.linear(x,self.weight)
-        else:
-            sub_weights = torch.chunk(self.weight, len(self.device_id), dim=0)
-            sub_biases = torch.chunk(self.bias, len(self.device_id), dim=0)
-            temp_x = x.cuda(self.device_id[0])
-            weight = sub_weights[0].cuda(self.device_id[0])
-            bias = sub_biases[0].cuda(self.device_id[0])
-            # out = F.linear(temp_x, weight, bias)
-            out = F.linear(temp_x,weight)
-            for i in range(1, len(self.device_id)):
-                temp_x = x.cuda(self.device_id[i])
-                weight = sub_weights[i].cuda(self.device_id[i])
-                bias = sub_biases[i].cuda(self.device_id[i])
-                # out = torch.cat((out, F.linear(temp_x, weight, bias).cuda(self.device_id[0])), dim=1)
-                out = torch.cat((out, F.linear(temp_x, weight).cuda(self.device_id[0])), dim=1)
-        return out
+    # def forward(self, x, label):
+    #     if self.device_id == None:
+    #         # out = F.linear(x, self.weight, self.bias)
+    #         out =F.linear(x,self.weight)
+    #     else:
+    #         sub_weights = torch.chunk(self.weight, len(self.device_id), dim=0)
+    #         sub_biases = torch.chunk(self.bias, len(self.device_id), dim=0)
+    #         temp_x = x.cuda(self.device_id[0])
+    #         weight = sub_weights[0].cuda(self.device_id[0])
+    #         bias = sub_biases[0].cuda(self.device_id[0])
+    #         # out = F.linear(temp_x, weight, bias)
+    #         out = F.linear(temp_x,weight)
+    #         for i in range(1, len(self.device_id)):
+    #             temp_x = x.cuda(self.device_id[i])
+    #             weight = sub_weights[i].cuda(self.device_id[i])
+    #             bias = sub_biases[i].cuda(self.device_id[i])
+    #             # out = torch.cat((out, F.linear(temp_x, weight, bias).cuda(self.device_id[0])), dim=1)
+    #             out = torch.cat((out, F.linear(temp_x, weight).cuda(self.device_id[0])), dim=1)
+    #     return out
+    def forward(self, x, mu, var,labels):
+        weight = self.weight
+        sample_weight = weight[labels]
+        topk_indice = findConfounders(weight,sample_weight,K=256)
+        topk_weight = weight[topk_indice]
+        all_class_density = torch.exp(- (topk_weight - mu[:, None, :]) ** 2 / (2 * var[:, None, :]))   # B * K * D
+        confid = all_class_density / torch.clamp(all_class_density.sum(dim=1, keepdim=True), min=1e-8)
+        max_confid, _ = confid.max(dim=1, keepdim=True)
+        nontrivial = (confid >= torch.clamp(max_confid * 0.5, max=0.1)).detach()  # B * C * D
+        score = self.scoring(x, nontrivial)
 
+        return score
+    
+    def scoring(self, embedding, nontrivial):
+        # return self.head(embedding)
+        return torch.matmul(embedding[:, None, :], (self.head.weight[None, :, :] * nontrivial).permute(0, 2, 1)).squeeze() + self.head.bias 
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -262,35 +277,18 @@ class Density_Softmax(nn.Module):
     def __init__(self, in_features, out_features):
         super(Density_Softmax, self).__init__()
         self.topk = True
+        self.mode = 1
 
-    def forward(self, weight, mu, var, labels): # center: c *dim
+    def forward(self, weight, mu, var, labels, nontrivial): # center: c *dim
         # weight = abs(center).detach()           # weight 复用center，可以选择detach # c *dim
         sample_weight = weight[labels]          # B * dim
         density = torch.exp(- (sample_weight - mu) ** 2 / (2 * var))# B * dim
         # nonzero_ratio = ((torch.sum(select_weight != 0,dim=1))).unsqueeze(1) # B 计算非零元素个数
         nonzeros = (sample_weight != 0).sum(dim=-1, keepdim=True) # B 计算非零元素个数
 
-        if not self.topk:
-        # 窗口循环计算—— 所有类别求和版本// 计算图未发生变化，显存占用不变
-            batch_size = mu.shape[0]
-            class_num, dim_size = weight.size()
 
-            all_class_density = torch.zeros(batch_size, dim_size).to(center.device) # B * D 
-            chunk_size = 2                     # 每次计算的块大小
-            n_chunks = class_num // chunk_size # 分块数
-            weight_chunks = torch.chunk(weight, n_chunks, dim=0) # 分块
-            
-            for weight_chunk in weight_chunks: # 按块计算
-                cur_weight_chunk = weight_chunk.unsqueeze(0)                        # 1 * chunk_size * D
-                temp_result = ((cur_weight_chunk - mu[:, None, :]) ** 2 ).sum(dim=1) /(2 * var[:, None, :]) # B * D
-                all_class_density += temp_result 
-
-            confid = (density / (all_class_density + 1e-8) / nonzero_ratio) # B * dim  -> P
-            confid = torch.log(confid + 1e-8)                           # B * dim -> logP  
-
-            return confid 
         # 窗口循环计算—— 选择topk类别求和版本
-        else:
+        if self.mode == 0:
             indices = findConfounders(weight, sample_weight, K=256)
             topk_weight = weight[indices]        # BK * D -> B * K * D
 
@@ -299,7 +297,9 @@ class Density_Softmax(nn.Module):
            
             _, _indices = topk_density.topk(2, dim=1, largest=True, sorted=True)
  
-            overly = (indices.gather(-1, _indices[:, 0]) == labels[:, None]) & ((density - topk_density.gather(1, _indices[:, 1][:, None, :]).squeeze()) >= 0.2 * total_density)
+            t = abs(sample_weight - mu) / torch.sqrt(2 * var)
+            overly = (torch.erf(t) > 0.9) | (indices.gather(-1, _indices[:, 0]) == labels[:, None]) & ((density - topk_density.gather(1, _indices[:, 1][:, None, :]).squeeze()) >= 0.2 * total_density)
+            # overly = (indices.gather(-1, _indices[:, 0]) == labels[:, None]) & ((density - topk_density.gather(1, _indices[:, 1][:, None, :]).squeeze()) >= 0.2 * total_density)
             overly = overly.float()
             confid = abs(sample_weight) * density / total_density * (1 - overly) 
 
@@ -314,6 +314,35 @@ class Density_Softmax(nn.Module):
 
             confid = confid.sum(dim=-1) / torch.clamp(nonzeros, min=1)# B * D  -> P
 
+            return confid.mean()
+        
+        else:
+            indices = findConfounders(weight, sample_weight, K=256)
+            topk_weight = weight[indices]                                                   # BK * D -> B * K * D
+            topk_density = torch.exp(- (topk_weight - mu[:, None, :]) ** 2 / (2 * var[:, None, :]))   # B * K * D
+            total_density = torch.clamp(topk_density.sum(dim=1), min=1e-8)              # B * D
+            all_class_density = topk_density
+            method = 1 
+            if method == 0:
+                _, indices = all_class_density.topk(2, dim=1, largest=True, sorted=True)                      # B * 2 * D
+
+                overly = (((indices[:, 0] == labels[:, None]) & (density - all_class_density.gather(1, indices[:, 1][:, None, :]).squeeze() >= 0.2 * total_density))).int()
+            else:
+                _, indices = all_class_density.min(dim=1)
+                nontrivial = nontrivial.scatter(1, indices[:, None, :], False)
+                minv = (all_class_density + (~ nontrivial) * 1000).min(dim=1, keepdim=True).values # b * d
+                maxv = (all_class_density - nontrivial * 1000).max(dim=1, keepdim=True).values
+                overly = ((nontrivial.gather(1, labels[:, None, None].expand(-1, -1, mu.shape[-1]))) & \
+                        ((minv - maxv) >= 0.2 * total_density)).int()
+
+            confid = - (density / total_density).log() * (1 - overly)
+            penalize = True
+            if penalize:
+                density_detached = torch.exp(- (sample_weight - mu).detach() ** 2 / (2 * var))
+                all_class_density_detached = torch.exp(- (weight[None, :, :] - mu[:, None, :]).detach() ** 2 / (2 * var[:, None, :]))
+                total_density_detached = torch.clamp(all_class_density_detached.sum(dim=1), min=1e-8)        #B * D
+                confid = confid + (density_detached / total_density_detached).log() * overly
+            confid = confid.mean(dim=-1)                                                                     #B
             return confid.mean()
 
 # class Density_Softmax(nn.Module):
